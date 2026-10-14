@@ -1,0 +1,70 @@
+# Wurd server.
+#   Local (recommended):  docker compose up -d                 -> http://localhost:8026
+#   LAN:                  docker compose --profile tls up -d   -> https://<WURD_HOST>:8443
+# Settings come from .env (copy .env.example).
+name: wurd
+
+services:
+  wurd:
+    build: .
+    image: wurd-server
+    restart: unless-stopped
+    environment:
+      WURD_TOKEN: ${WURD_TOKEN:-}
+      WURD_TOKEN_FILE: ${WURD_TOKEN_FILE:-}
+      WURD_MAX_FILE_MB: ${WURD_MAX_FILE_MB:-25}
+      WURD_MAX_TOTAL_MB: ${WURD_MAX_TOTAL_MB:-1024}
+      WURD_MAX_FILES: ${WURD_MAX_FILES:-5000}
+      WURD_ALLOWED_ORIGINS: ${WURD_ALLOWED_ORIGINS:-}
+      # Only the TLS proxy may report the client's IP (used for the failed-login limit)
+      WURD_TRUSTED_PROXIES: ${WURD_PROXY_IP:-172.29.84.10}
+    ports:
+      # This machine only. For other devices, use the tls profile rather than changing this.
+      - "127.0.0.1:${WURD_PORT:-8026}:8026"
+    volumes:
+      - wurd-data:/data
+      - ${WURD_FRONTEND_DIR:-../wurd}:/srv/wurd:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 256m
+    pids_limit: 64
+    networks: [wurd]
+
+  caddy:
+    image: caddy:2-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+    profiles: [tls]
+    restart: unless-stopped
+    depends_on: [wurd]
+    environment:
+      WURD_HOST: ${WURD_HOST:-localhost}
+      WURD_TLS: ${WURD_TLS:-internal}
+    ports:
+      - "${WURD_TLS_PORT:-8443}:8443"
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Caddy's certificate authority: keep it, or every device has to trust a new one
+      - caddy-data:/data
+    read_only: true
+    tmpfs:
+      - /config
+    cap_drop: [ALL]
+    # The caddy binary carries this file capability and won't exec without it
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    networks:
+      wurd:
+        ipv4_address: ${WURD_PROXY_IP:-172.29.84.10}
+
+networks:
+  wurd:
+    ipam:
+      config:
+        - subnet: ${WURD_SUBNET:-172.29.84.0/24}
+
+volumes:
+  wurd-data:
+  caddy-data:

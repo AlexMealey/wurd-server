@@ -1,0 +1,16 @@
+# HTTPS in front of the Wurd server, for LAN (and, discouraged, Internet) use.
+# WURD_HOST is the name or IP address devices use to reach this machine.
+# WURD_TLS is "internal" (Caddy's own certificate authority, for a LAN) or an email address
+# (a Let's Encrypt certificate, for a public domain).
+{
+	admin off
+	https_port 8443
+	auto_https disable_redirects
+	skip_install_trust
+}
+
+{$WURD_HOST} {
+	tls {$WURD_TLS}
+	header Strict-Transport-Security "max-age=31536000"
+	reverse_proxy wurd:8026
+}
