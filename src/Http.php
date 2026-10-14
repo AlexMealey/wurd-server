@@ -121,20 +121,26 @@ final class Http
         self::json($e->status, ['error' => $e->getMessage()], $e->headers);
     }
 
-    // Sends a stored file. Always as an opaque download, never with its own type, so a stored .html
-    // page can't run in the browser on this server's origin.
-    public static function download(string $path, array $meta): never
+    // Sends a stored file from its decrypted chunks. Always as an opaque download, never with its own type,
+    // so a stored .html page can't run in the browser on this server's origin.
+    /** @param \Generator<string> $chunks */
+    public static function download(\Generator $chunks, array $meta): never
     {
-        $file = fopen($path, 'rb');
-        if ($file === false) {
-            throw new \RuntimeException("Can't open stored file {$meta['id']}");
-        }
+        // Decrypts the first chunk before any header goes out, so a bad key or damaged file is still a clean error
+        $chunks->current();
         $fallback = preg_replace('/[^A-Za-z0-9._ -]/', '_', $meta['name']);
         header('Content-Type: application/octet-stream');
-        header('Content-Length: ' . fstat($file)['size']);
+        header("Content-Length: {$meta['size']}");
         header("Content-Disposition: attachment; filename=\"{$fallback}\"; filename*=UTF-8''" . rawurlencode($meta['name']));
         header("ETag: \"{$meta['rev']}\"");
-        fpassthru($file);
+        try {
+            for (; $chunks->valid(); $chunks->next()) {
+                echo $chunks->current();
+            }
+        } catch (\Throwable $e) {
+            // The headers are gone, so cut the body short: the client sees a failed download, not a wrong file
+            error_log('wurd: ' . $e::class . ": {$e->getMessage()}");
+        }
         exit;
     }
 }

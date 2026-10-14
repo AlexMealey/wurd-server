@@ -1,8 +1,8 @@
 # wurd-server
 
-An optional storage backend for the [Wurd](../wurd) editor. It stores document files and hands them back.
+An optional storage backend for the [Wurd](../wurd) editor. Each user gets their own token and their own vault of documents, stored encrypted with a key that only their token unlocks.
 
-The browser does every conversion and every encryption. The server never opens, parses or converts a document, and an encrypted `.wurd` file reaches it already encrypted. Without a server, Wurd works exactly as before.
+The browser does every conversion. The server never opens, parses or converts a document, and an encrypted `.wurd` file reaches it already encrypted. Without a server, Wurd works exactly as before.
 
 - **Stack:** PHP 8.5 + Apache + SQLite, in one container. No Composer packages, no framework.
 - **Recommended:** run it on the same machine as your browser, or on your LAN. Hosting it on the Internet is possible, but discouraged.
@@ -12,12 +12,12 @@ The browser does every conversion and every encryption. The server never opens, 
 ```sh
 cp .env.example .env
 chmod 600 .env
-sed -i "s/^WURD_TOKEN=.*/WURD_TOKEN=$(openssl rand -hex 32)/" .env
 docker compose up -d
 ```
 
 1. Open http://localhost:8026. Wurd is served from `../wurd` (set `WURD_FRONTEND_DIR` to change it).
-2. In Wurd, open the **Vault** tab and connect using the token from `.env`.
+2. In Wurd, open the **Vault** tab and select **Request a token**. Copy the token somewhere safe: it's shown once, and it's the only key to your files.
+3. Connect with it. Tick **Remember address** to keep the address on this device, and **Stay connected in this tab** to survive a page reload. The token itself is never stored beyond the tab.
 
 The port is bound to `127.0.0.1`, so nothing else on the network can reach it.
 
@@ -59,24 +59,23 @@ If you do publish it:
 
 | Variable | Default | |
 |---|---|---|
-| `WURD_TOKEN` | none (required) | At least 32 characters. The server won't start without it. |
-| `WURD_TOKEN_FILE` | | Read the token from a file (Docker secrets) instead. |
 | `WURD_FRONTEND_DIR` | `../wurd` | Served read-only at `/`. |
 | `WURD_PORT` | `8026` | Local port, bound to `127.0.0.1`. |
 | `WURD_MAX_FILE_MB` | `25` | Largest single file. |
-| `WURD_MAX_TOTAL_MB` | `1024` | Total storage. |
-| `WURD_MAX_FILES` | `5000` | Number of files. |
+| `WURD_MAX_TOTAL_MB` | `1024` | Total storage, across all users. |
+| `WURD_MAX_FILES` | `5000` | Number of files, across all users. |
 | `WURD_ALLOWED_ORIGINS` | empty | Origins allowed to call the API from another page: `null` for Wurd opened from `file://`, or e.g. `http://localhost:8000`. Not needed when Wurd is opened from this server. |
 | `WURD_HOST`, `WURD_TLS`, `WURD_TLS_PORT` | `localhost`, `internal`, `8443` | LAN/Internet mode. |
 | `WURD_SUBNET`, `WURD_PROXY_IP` | `172.29.84.0/24`, `.10` | The Docker network between Caddy and Wurd. Change both if the subnet clashes. |
 
 ## API
 
-Every route except `/api/health` needs `Authorization: Bearer <token>`. Errors come back as `{"error": "..."}`.
+Every route except `/api/health` and `/api/tokens` needs `Authorization: Bearer <token>`, and only ever sees that token's own files: another user's file ID gets `404`. Errors come back as `{"error": "..."}`.
 
 | Method | Path | Request | Response |
 |---|---|---|---|
 | GET | `/api/health` | | `{"ok":true}` |
+| POST | `/api/tokens` | | `201` + `{"token": "wurd_<id>_<secret>"}`: a new user with an empty vault. Shown once. |
 | GET | `/api/files` | | `[{id, name, format, size, rev, updatedAt}]`, newest first |
 | POST | `/api/files` | file bytes; `X-File-Name: <percent-encoded name>` | `201` + metadata, `ETag: "1"` |
 | GET | `/api/files/{id}` | | file bytes, `ETag`, always as an `application/octet-stream` attachment |
@@ -95,14 +94,16 @@ Every route except `/api/health` needs `Authorization: Bearer <token>`. Errors c
 | `413` | Too large |
 | `415` | Contents don't match the extension |
 | `428` | `If-Match` missing |
-| `429` | 10 wrong tokens from one IP in 10 minutes |
+| `429` | 10 wrong tokens from one IP in 10 minutes, or 5 token requests from one IP in an hour |
 | `507` | Quota full |
 
 ## Security
 
 The design is in [PLAN.md](PLAN.md). In short:
 
-- **No open mode.** Without a valid token, the server won't start.
+- **Per-user tokens.** Anyone who can reach the server can request a token (5 per IP per hour), which is why it listens on `127.0.0.1` by default. The database keeps only a salted HKDF-SHA256 verifier of each token, never the token itself.
+- **Encrypted at rest.** Each file is encrypted with XChaCha20-Poly1305 (libsodium secretstream) under a key derived from its owner's token on every request and never stored. Plaintext never reaches the disk, and a file that was changed on disk fails to download rather than returning wrong bytes.
+- **Lost token, lost files.** Nobody, including the server's admin, can decrypt a vault without its token. A new token opens a new, empty vault.
 - **Same origin.** The frontend and API share one origin, so no CORS is needed.
 - **Downloads can't run.** Stored files are only ever sent as opaque downloads, so a stored `.html` file can't run on this origin.
 - **Names never touch the disk.** Files are stored under random IDs, and file names are never used as paths.
@@ -131,8 +132,12 @@ docker run --rm -v wurd_wurd-data:/data -v "$PWD":/backup alpine sh -c 'tar xzf 
 docker compose up -d
 ```
 
-## Rotating the token
+## Upgrading from the single shared token
 
-1. Put a new token in `.env`.
-2. Run `docker compose up -d`.
-3. Reconnect each device in Wurd's Vault tab.
+`WURD_TOKEN` is no longer used and can be removed from `.env`. Files stored before the upgrade have no owner and aren't encrypted, so no token can see them. Download any you need with the old version first. To clear them out, start with an empty volume:
+
+```sh
+docker compose down
+docker volume rm wurd_wurd-data
+docker compose up -d
+```

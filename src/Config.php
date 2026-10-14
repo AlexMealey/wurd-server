@@ -1,6 +1,6 @@
 <?php
 // Server settings, read from the environment. Anything invalid stops the server rather than
-// running it with a weaker setting: there is no default token and no open mode.
+// running it with a weaker setting. Tokens aren't settings: users request their own (see Users).
 declare(strict_types=1);
 
 namespace Wurd;
@@ -10,11 +10,9 @@ final class ConfigError extends \RuntimeException {}
 final readonly class Config
 {
     public const string DATA_DIR = '/data';
-    private const int MIN_TOKEN_LENGTH = 32;
 
     /** @param list<string> $allowedOrigins */
     public function __construct(
-        public string $token,
         public int $maxFileBytes,
         public int $maxTotalBytes,
         public int $maxFiles,
@@ -23,20 +21,7 @@ final readonly class Config
 
     public static function fromEnvironment(): self
     {
-        $token = (string) getenv('WURD_TOKEN');
-        if ($token === '') {
-            throw new ConfigError('WURD_TOKEN is not set. Generate one with: openssl rand -hex 32');
-        }
-        if (strlen($token) < self::MIN_TOKEN_LENGTH) {
-            throw new ConfigError('WURD_TOKEN must be at least ' . self::MIN_TOKEN_LENGTH . ' characters. Generate one with: openssl rand -hex 32');
-        }
-        // It travels in an HTTP header, so printable ASCII without spaces only
-        if (!preg_match('/^[\x21-\x7E]+$/', $token)) {
-            throw new ConfigError('WURD_TOKEN may only contain printable ASCII characters, without spaces.');
-        }
-
         return new self(
-            token: $token,
             maxFileBytes: self::megabytes('WURD_MAX_FILE_MB', 25),
             maxTotalBytes: self::megabytes('WURD_MAX_TOTAL_MB', 1024),
             maxFiles: self::positiveInt('WURD_MAX_FILES', 5000),

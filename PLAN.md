@@ -87,9 +87,9 @@ Every write is atomic:
 
 ### Authentication
 
-- One bearer token, read from `WURD_TOKEN` or from `WURD_TOKEN_FILE` (for Docker secrets). Generate it with `openssl rand -hex 32`.
-- **Fail closed.** If the token is missing or shorter than 32 characters, the entrypoint exits with a clear message. The server never runs open.
-- Tokens are compared with `hash_equals()` on SHA-256 digests, so the check takes constant time whatever the token length.
+- **Per-user tokens** (replaced the original single `WURD_TOKEN`). `POST /api/tokens` issues `wurd_<16 hex id>_<64 hex secret>`, at most 5 per IP per hour. The `users` table keeps a random salt and an HKDF-SHA256 verifier of the secret, compared with `hash_equals()`. The token itself is never stored.
+- **Encryption at rest.** Each user's file key is HKDF-derived from their token's secret on every request and never stored. Files are libsodium secretstreams (XChaCha20-Poly1305, 64 KiB chunks, the file ID as additional data), encrypted while the upload streams in. A lost token means a lost vault.
+- Every file query is scoped to the requesting user, so another user's file ID gets `404`.
 - No cookies and no sessions, which makes CSRF impossible.
 - 10 failed attempts from one IP in 10 minutes returns `429`. Behind Caddy, `mod_remoteip` trusts `X-Forwarded-For` only from the compose network's subnet.
 
@@ -201,11 +201,11 @@ The frontend stays offline-first and keeps using classic scripts, so `file://` s
 
 ## Out of scope for v1
 
-Multi-user accounts, version history, folders, share links, server-side conversion or previews, search.
+Version history, folders, share links, server-side conversion or previews, search.
 
 ## Decisions to confirm
 
-1. **Single shared token.** Everyone with the token sees every file. Per-user accounts would roughly double the size.
+1. ~~**Single shared token.**~~ Replaced by per-user tokens with encrypted vaults (see Authentication).
 2. **Serve the frontend from the container** (same origin), rather than an API-only server with CORS.
 3. **Files on disk named by opaque ID** (safest), rather than readable names in a host folder (easier to browse, but means handling paths).
 4. **`php:8.5-apache` plus an optional Caddy sidecar for TLS**, rather than FrankenPHP: one container with built-in HTTPS, but less familiar.

@@ -1,6 +1,6 @@
 <?php
 // Run by the entrypoint before Apache starts. Checks the configuration, so the server refuses to
-// start without a usable token, and prepares /data.
+// start with invalid settings, and prepares /data.
 declare(strict_types=1);
 
 namespace Wurd;

@@ -7,6 +7,8 @@ namespace Wurd;
 require __DIR__ . '/../src/Config.php';
 require __DIR__ . '/../src/Http.php';
 require __DIR__ . '/../src/Auth.php';
+require __DIR__ . '/../src/Users.php';
+require __DIR__ . '/../src/Vault.php';
 require __DIR__ . '/../src/Store.php';
 
 const FILE_ROUTE = '#^/api/files/([0-9a-f]{32})$#';
@@ -26,6 +28,12 @@ try {
         Http::json(200, ['ok' => true]);
     }
 
+    // Anyone who can reach the server can get a token; each one opens a new, empty vault
+    if ($path === '/api/tokens') {
+        $method === 'POST' || throw new HttpError(405, 'Use POST.', ['Allow' => 'POST']);
+        Http::json(201, ['token' => new Users(Store::connect())->issue(Http::clientIp())]);
+    }
+
     $isList = $path === '/api/files';
     $isFile = (bool) preg_match(FILE_ROUTE, $path, $m);
     if (!$isList && !$isFile) {
@@ -37,8 +45,8 @@ try {
     }
 
     $db = Store::connect();
-    new Auth($db, $config->token)->check(Http::clientIp(), Http::header('Authorization'));
-    $store = new Store($db, $config);
+    $user = new Auth($db)->check(Http::clientIp(), Http::header('Authorization'));
+    $store = new Store($db, $config, $user);
 
     if ($isList) {
         if ($method === 'GET') {
@@ -53,7 +61,7 @@ try {
     switch ($method) {
         case 'GET':
             $file = $store->get($id);
-            Http::download($store->path($id), $file);
+            Http::download($store->read($id), $file);
         case 'PUT':
             $rev = Http::ifMatch();
             $rename = Http::header('X-File-Name') === null ? null : Store::parseName(Http::header('X-File-Name'));

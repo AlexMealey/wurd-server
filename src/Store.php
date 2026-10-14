@@ -1,7 +1,7 @@
 <?php
-// The file store: metadata in SQLite, contents in /data/files named by random ID. Stored files are
-// never parsed or converted; the browser does all of that. User-supplied names are only ever data,
-// never part of a path.
+// The file store: metadata in SQLite, contents in /data/files named by random ID and encrypted with the
+// owner's key (see Vault). Each user sees only their own files. Stored files are never parsed or converted;
+// the browser does all of that. User-supplied names are only ever data, never part of a path.
 declare(strict_types=1);
 
 namespace Wurd;
@@ -13,7 +13,7 @@ final readonly class Store
     private const int MAX_NAME_BYTES = 200;
     private const string FIELDS = 'id, name, format, size, rev, updated_at AS updatedAt';
 
-    public function __construct(private \PDO $db, private Config $config) {}
+    public function __construct(private \PDO $db, private Config $config, private User $user) {}
 
     public static function connect(): \PDO
     {
@@ -41,8 +41,16 @@ final readonly class Store
         $db = self::connect();
         $db->exec('PRAGMA journal_mode = WAL');
         $db->exec(<<<'SQL'
+            CREATE TABLE IF NOT EXISTS users (
+              id           TEXT PRIMARY KEY,
+              salt         BLOB NOT NULL,
+              verifier     BLOB NOT NULL,
+              created_at   TEXT NOT NULL,
+              last_used_at TEXT
+            );
             CREATE TABLE IF NOT EXISTS files (
               id         TEXT PRIMARY KEY,
+              user_id    TEXT REFERENCES users (id),
               name       TEXT NOT NULL,
               format     TEXT NOT NULL,
               size       INTEGER NOT NULL,
@@ -52,7 +60,14 @@ final readonly class Store
             );
             CREATE TABLE IF NOT EXISTS auth_failures (ip TEXT NOT NULL, at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS auth_failures_ip_at ON auth_failures (ip, at);
+            CREATE TABLE IF NOT EXISTS token_requests (ip TEXT NOT NULL, at INTEGER NOT NULL);
+            CREATE INDEX IF NOT EXISTS token_requests_ip_at ON token_requests (ip, at);
             SQL);
+        // Files stored before per-user tokens have no owner (and aren't encrypted), so they're never listed
+        if (!in_array('user_id', array_column($db->query('PRAGMA table_info(files)')->fetchAll(), 'name'), true)) {
+            $db->exec('ALTER TABLE files ADD COLUMN user_id TEXT REFERENCES users (id)');
+        }
+        $db->exec('CREATE INDEX IF NOT EXISTS files_user_updated ON files (user_id, updated_at)');
     }
 
     // [name, format] from an X-File-Name header (percent-encoded UTF-8)
@@ -76,13 +91,15 @@ final readonly class Store
 
     public function list(): array
     {
-        return $this->db->query('SELECT ' . self::FIELDS . ' FROM files ORDER BY updated_at DESC, id')->fetchAll();
+        $statement = $this->db->prepare('SELECT ' . self::FIELDS . ' FROM files WHERE user_id = ? ORDER BY updated_at DESC, id');
+        $statement->execute([$this->user->id]);
+        return $statement->fetchAll();
     }
 
     public function get(string $id): array
     {
-        $statement = $this->db->prepare('SELECT ' . self::FIELDS . ' FROM files WHERE id = ?');
-        $statement->execute([$id]);
+        $statement = $this->db->prepare('SELECT ' . self::FIELDS . ' FROM files WHERE id = ? AND user_id = ?');
+        $statement->execute([$id, $this->user->id]);
         return $statement->fetch() ?: throw new HttpError(404, 'No such file.');
     }
 
@@ -95,16 +112,29 @@ final readonly class Store
         return Config::DATA_DIR . "/files/{$id}";
     }
 
+    // A stored file's contents, decrypted chunk by chunk
+    /** @return \Generator<string> */
+    public function read(string $id): \Generator
+    {
+        $file = fopen($this->path($id), 'rb') ?: throw new \RuntimeException("Can't open stored file {$id}");
+        try {
+            yield from Vault::decrypt($file, $this->user->fileKey, $id);
+        } finally {
+            fclose($file);
+        }
+    }
+
     public function create(string $name, string $format, int $length): array
     {
-        $tmp = $this->receive($format, $length);
+        // The ID is part of what's encrypted, so it's chosen before the upload is read
+        $id = bin2hex(random_bytes(16));
+        $tmp = $this->receive($id, $format, $length);
         try {
-            $id = bin2hex(random_bytes(16));
             $this->transaction(function () use ($id, $name, $format, $length, $tmp): void {
                 $this->checkQuota(1, $length);
                 $now = self::now();
-                $this->db->prepare('INSERT INTO files (id, name, format, size, rev, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)')
-                    ->execute([$id, $name, $format, $length, $now, $now]);
+                $this->db->prepare('INSERT INTO files (id, user_id, name, format, size, rev, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)')
+                    ->execute([$id, $this->user->id, $name, $format, $length, $now, $now]);
                 $this->moveInto($tmp, $id);
             });
             return $this->get($id);
@@ -121,14 +151,14 @@ final readonly class Store
     {
         $current = $this->get($id);
         [$name, $format] = $rename ?? [$current['name'], $current['format']];
-        $tmp = $this->receive($format, $length);
+        $tmp = $this->receive($id, $format, $length);
         try {
             $this->transaction(function () use ($id, $rev, $name, $format, $length, $tmp): void {
                 $old = $this->get($id);
                 self::checkRevision($old, $rev);
                 $this->checkQuota(0, $length - $old['size']);
-                $this->db->prepare('UPDATE files SET name = ?, format = ?, size = ?, rev = rev + 1, updated_at = ? WHERE id = ?')
-                    ->execute([$name, $format, $length, self::now(), $id]);
+                $this->db->prepare('UPDATE files SET name = ?, format = ?, size = ?, rev = rev + 1, updated_at = ? WHERE id = ? AND user_id = ?')
+                    ->execute([$name, $format, $length, self::now(), $id, $this->user->id]);
                 $this->moveInto($tmp, $id);
             });
             return $this->get($id);
@@ -143,26 +173,25 @@ final readonly class Store
     {
         $this->transaction(function () use ($id, $rev): void {
             self::checkRevision($this->get($id), $rev);
-            $this->db->prepare('DELETE FROM files WHERE id = ?')->execute([$id]);
+            $this->db->prepare('DELETE FROM files WHERE id = ? AND user_id = ?')->execute([$id, $this->user->id]);
         });
         unlink($this->path($id));
     }
 
-    // Streams the request body into a temporary file in /data, so a large upload never sits in memory
-    private function receive(string $format, int $length): string
+    // Encrypts the request body into a temporary file in /data as it arrives, so a large upload never sits
+    // in memory and its plaintext never reaches the disk
+    private function receive(string $id, string $format, int $length): string
     {
         $tmp = Config::DATA_DIR . '/tmp/' . bin2hex(random_bytes(16));
         $out = fopen($tmp, 'xb') ?: throw new \RuntimeException("Can't create {$tmp}");
         try {
-            $copied = $length > 0 ? stream_copy_to_stream(fopen('php://input', 'rb'), $out, $length) : 0;
-            if ($copied !== $length) {
-                throw new HttpError(400, 'The upload ended early.');
-            }
+            Vault::encrypt(fopen('php://input', 'rb'), $out, $length, $this->user->fileKey, $id, function (string $head) use ($format): void {
+                if (!self::looksLike($format, $head)) {
+                    throw new HttpError(415, "The file's contents don't match its .{$format} extension.");
+                }
+            });
             fsync($out);
             fclose($out);
-            if (!self::looksLike($format, $tmp)) {
-                throw new HttpError(415, "The file's contents don't match its .{$format} extension.");
-            }
             return $tmp;
         } catch (\Throwable $e) {
             if (is_resource($out)) {
@@ -174,9 +203,8 @@ final readonly class Store
     }
 
     // A sanity check of the first bytes. The server never reads documents beyond this.
-    private static function looksLike(string $format, string $path): bool
+    private static function looksLike(string $format, string $head): bool
     {
-        $head = (string) file_get_contents($path, length: 8192);
         return match ($format) {
             'docx', 'odt' => str_starts_with($head, "PK\x03\x04"),
             'wurd' => (bool) preg_match('/^\s*\{\s*"wurd"\s*:\s*"encrypted-document"/', $head),
@@ -224,7 +252,7 @@ final readonly class Store
         }
     }
 
-    private static function now(): string
+    public static function now(): string
     {
         return new \DateTimeImmutable('now', new \DateTimeZone('UTC'))->format('Y-m-d\TH:i:s.v\Z');
     }

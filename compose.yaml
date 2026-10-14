@@ -10,8 +10,6 @@ services:
     image: wurd-server
     restart: unless-stopped
     environment:
-      WURD_TOKEN: ${WURD_TOKEN:-}
-      WURD_TOKEN_FILE: ${WURD_TOKEN_FILE:-}
       WURD_MAX_FILE_MB: ${WURD_MAX_FILE_MB:-25}
       WURD_MAX_TOTAL_MB: ${WURD_MAX_TOTAL_MB:-1024}
       WURD_MAX_FILES: ${WURD_MAX_FILES:-5000}
