@@ -87,8 +87,11 @@ Every write is atomic:
 
 ### Authentication
 
-- **Per-user tokens** (replaced the original single `WURD_TOKEN`). `POST /api/tokens` issues `wurd_<16 hex id>_<64 hex secret>`, at most 5 per IP per hour. The `users` table keeps a random salt and an HKDF-SHA256 verifier of the secret, compared with `hash_equals()`. The token itself is never stored.
-- **Encryption at rest.** Each user's file key is HKDF-derived from their token's secret on every request and never stored. Files are libsodium secretstreams (XChaCha20-Poly1305, 64 KiB chunks, the file ID as additional data), encrypted while the upload streams in. A lost token means a lost vault.
+- **Per-user tokens** (replaced the original single `WURD_TOKEN`). `POST /api/tokens` issues `wurd_<16 hex id>_<64 hex secret>`, at most 5 per IP per hour. The `users` table keeps a random salt and a verifier of the secret, compared with `hash_equals()`. The token itself is never stored.
+- **Pepper.** `WURD_PEPPER` (32 random bytes, in `.env`, never in `/data`) keys the first step of every derivation: `ikm = HMAC-SHA256(pepper, secret)`, then `verifier = HKDF(ikm, salt, "wurd token v2")` and `kek = HKDF(ikm, salt, "wurd vault key v2")`. An HMAC of the pepper is kept in `settings`, so the server refuses to start with a different one.
+- **Encryption at rest.** Each user has a random vault key, stored only wrapped under `kek` (XChaCha20-Poly1305, the user ID as additional data). Files are libsodium secretstreams (XChaCha20-Poly1305, 64 KiB chunks, the file ID as additional data), encrypted while the upload streams in. A download is authenticated in full before any of it is sent, and data after the final chunk is refused. A lost token means a lost vault.
+- **Why not Argon2.** The token secret is 256 random bits, so a slow KDF adds no protection against guessing, only cost per request. HKDF is the right tool for high-entropy input; Argon2id is used where a person's password is the input (`.wurd` files, in the browser).
+- **Users from before the pepper** (`scheme = 1`) are checked against their old verifier once, and their old HKDF file key becomes their wrapped vault key (`scheme = 2`). No file is re-encrypted.
 - Every file query is scoped to the requesting user, so another user's file ID gets `404`.
 - No cookies and no sessions, which makes CSRF impossible.
 - 10 failed attempts from one IP in 10 minutes returns `429`. Behind Caddy, `mod_remoteip` trusts `X-Forwarded-For` only from the compose network's subnet.

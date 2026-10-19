@@ -31,7 +31,7 @@ try {
     // Anyone who can reach the server can get a token; each one opens a new, empty vault
     if ($path === '/api/tokens') {
         $method === 'POST' || throw new HttpError(405, 'Use POST.', ['Allow' => 'POST']);
-        Http::json(201, ['token' => new Users(Store::connect())->issue(Http::clientIp())]);
+        Http::json(201, ['token' => new Users(Store::connect(), $config->pepper)->issue(Http::clientIp())]);
     }
 
     $isList = $path === '/api/files';
@@ -45,7 +45,7 @@ try {
     }
 
     $db = Store::connect();
-    $user = new Auth($db)->check(Http::clientIp(), Http::header('Authorization'));
+    $user = new Auth($db, $config->pepper)->check(Http::clientIp(), Http::header('Authorization'));
     $store = new Store($db, $config, $user);
 
     if ($isList) {

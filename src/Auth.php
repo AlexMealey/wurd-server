@@ -10,7 +10,7 @@ final readonly class Auth
     private const int MAX_FAILURES = 10;
     private const int WINDOW_SECONDS = 600;
 
-    public function __construct(private \PDO $db) {}
+    public function __construct(private \PDO $db, #[\SensitiveParameter] private string $pepper) {}
 
     public function check(string $ip, ?string $authorization): User
     {
@@ -22,7 +22,7 @@ final readonly class Auth
         }
 
         $given = preg_match('/^Bearer +(\S+)$/i', trim($authorization ?? ''), $m) ? $m[1] : '';
-        $user = new Users($this->db)->authenticate($given);
+        $user = new Users($this->db, $this->pepper)->authenticate($given);
         if ($user !== null) {
             return $user;
         }

@@ -1,6 +1,6 @@
 # wurd-server
 
-An optional storage backend for the [Wurd](../wurd) editor. Each user gets their own token and their own vault of documents, stored encrypted with a key that only their token unlocks.
+An optional storage backend for the [Wurd](../wurd) editor. Each user gets their own token and their own vault of documents, stored encrypted with a key that only their token (together with the server's pepper) unlocks.
 
 The browser does every conversion. The server never opens, parses or converts a document, and an encrypted `.wurd` file reaches it already encrypted. Without a server, Wurd works exactly as before.
 
@@ -12,8 +12,11 @@ The browser does every conversion. The server never opens, parses or converts a 
 ```sh
 cp .env.example .env
 chmod 600 .env
+sed -i "s/^WURD_PEPPER=.*/WURD_PEPPER=$(openssl rand -hex 32)/" .env
 docker compose up -d
 ```
+
+Keep a copy of `WURD_PEPPER` somewhere safe, apart from your backups of the data volume. If it's lost or changed, no vault can be opened.
 
 1. Open http://localhost:8026. Wurd is served from `../wurd` (set `WURD_FRONTEND_DIR` to change it).
 2. In Wurd, open the **Vault** tab and select **Request a token**. Copy the token somewhere safe: it's shown once, and it's the only key to your files.
@@ -59,6 +62,7 @@ If you do publish it:
 
 | Variable | Default | |
 |---|---|---|
+| `WURD_PEPPER` | none (required) | 64 hex characters (`openssl rand -hex 32`). Every vault key depends on it. The server won't start without it, or with a different one from the one its data was set up with. |
 | `WURD_FRONTEND_DIR` | `../wurd` | Served read-only at `/`. |
 | `WURD_PORT` | `8026` | Local port, bound to `127.0.0.1`. |
 | `WURD_MAX_FILE_MB` | `25` | Largest single file. |
@@ -101,8 +105,10 @@ Every route except `/api/health` and `/api/tokens` needs `Authorization: Bearer 
 
 The design is in [PLAN.md](PLAN.md). In short:
 
-- **Per-user tokens.** Anyone who can reach the server can request a token (5 per IP per hour), which is why it listens on `127.0.0.1` by default. The database keeps only a salted HKDF-SHA256 verifier of each token, never the token itself.
-- **Encrypted at rest.** Each file is encrypted with XChaCha20-Poly1305 (libsodium secretstream) under a key derived from its owner's token on every request and never stored. Plaintext never reaches the disk, and a file that was changed on disk fails to download rather than returning wrong bytes.
+- **Per-user tokens.** Anyone who can reach the server can request a token (5 per IP per hour), which is why it listens on `127.0.0.1` by default. Tokens carry 256 random bits. The database keeps only a salted, peppered HKDF-SHA256 verifier of each token, never the token itself.
+- **Encrypted at rest.** Each file is encrypted with XChaCha20-Poly1305 (libsodium secretstream) under its owner's random vault key. That key is stored only wrapped (XChaCha20-Poly1305) under a key derived from the token and the pepper on every request. Plaintext never reaches the disk.
+- **Pepper.** `WURD_PEPPER` lives in `.env`, outside the data volume, so a copy of the volume opens nothing, even together with a token. The server checks it at startup and refuses to start with the wrong one.
+- **Checked before sent.** A download is authenticated in full before its first byte goes out, so a file that was changed or damaged on disk is an error, never a partial or wrong download.
 - **Lost token, lost files.** Nobody, including the server's admin, can decrypt a vault without its token. A new token opens a new, empty vault.
 - **Same origin.** The frontend and API share one origin, so no CORS is needed.
 - **Downloads can't run.** Stored files are only ever sent as opaque downloads, so a stored `.html` file can't run on this origin.
@@ -120,7 +126,7 @@ This starts a throwaway container and checks the API and every security rule.
 
 ## Backup and restore
 
-All state is in the `wurd_wurd-data` volume.
+All state is in the `wurd_wurd-data` volume, except `WURD_PEPPER`. A volume backup is useless without it, so back up `.env` too, but keep it apart from the volume backups.
 
 ```sh
 # Back up
@@ -131,6 +137,10 @@ docker compose down
 docker run --rm -v wurd_wurd-data:/data -v "$PWD":/backup alpine sh -c 'tar xzf /backup/wurd-backup.tgz -C /data && chown -R 33:33 /data'
 docker compose up -d
 ```
+
+## Upgrading to the pepper
+
+Add `WURD_PEPPER` to `.env` (see above) before restarting. Existing tokens keep working: on each user's next request, their vault key is wrapped under the new peppered key, and their files stay as they are. From then on the pepper is needed to open that vault.
 
 ## Upgrading from the single shared token
 

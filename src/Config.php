@@ -1,6 +1,7 @@
 <?php
 // Server settings, read from the environment. Anything invalid stops the server rather than
 // running it with a weaker setting. Tokens aren't settings: users request their own (see Users).
+// WURD_PEPPER is a secret kept outside /data that every vault key also depends on (see Users).
 declare(strict_types=1);
 
 namespace Wurd;
@@ -17,6 +18,7 @@ final readonly class Config
         public int $maxTotalBytes,
         public int $maxFiles,
         public array $allowedOrigins,
+        #[\SensitiveParameter] public string $pepper,
     ) {}
 
     public static function fromEnvironment(): self
@@ -26,6 +28,7 @@ final readonly class Config
             maxTotalBytes: self::megabytes('WURD_MAX_TOTAL_MB', 1024),
             maxFiles: self::positiveInt('WURD_MAX_FILES', 5000),
             allowedOrigins: self::origins(),
+            pepper: self::pepper(),
         );
     }
 
@@ -41,6 +44,16 @@ final readonly class Config
                 throw new ConfigError("WURD_TRUSTED_PROXIES: \"{$entry}\" isn't an IP address or CIDR range.");
             }
         }
+    }
+
+    // 32 random bytes as hex. Without it no vault can be opened, so there's no default.
+    private static function pepper(): string
+    {
+        $value = (string) getenv('WURD_PEPPER');
+        if (!preg_match('/^[0-9a-fA-F]{64}$/', $value)) {
+            throw new ConfigError('WURD_PEPPER must be 64 hex characters. Generate one with: openssl rand -hex 32. Keep a copy apart from your backups of /data: without it, no vault can be opened.');
+        }
+        return hex2bin($value);
     }
 
     private static function positiveInt(string $name, int $default): int

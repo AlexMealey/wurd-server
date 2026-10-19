@@ -126,7 +126,8 @@ final class Http
     /** @param \Generator<string> $chunks */
     public static function download(\Generator $chunks, array $meta): never
     {
-        // Decrypts the first chunk before any header goes out, so a bad key or damaged file is still a clean error
+        // Store::read authenticates the whole file before its first chunk, which happens here, before any
+        // header goes out: a bad key or damaged file is a clean error
         $chunks->current();
         $fallback = preg_replace('/[^A-Za-z0-9._ -]/', '_', $meta['name']);
         header('Content-Type: application/octet-stream');
@@ -138,7 +139,8 @@ final class Http
                 echo $chunks->current();
             }
         } catch (\Throwable $e) {
-            // The headers are gone, so cut the body short: the client sees a failed download, not a wrong file
+            // Only a read error can get here now. The headers are gone, so cut the body short: the client sees a
+            // failed download, not a wrong file
             error_log('wurd: ' . $e::class . ": {$e->getMessage()}");
         }
         exit;

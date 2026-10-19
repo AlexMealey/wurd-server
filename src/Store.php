@@ -45,6 +45,8 @@ final readonly class Store
               id           TEXT PRIMARY KEY,
               salt         BLOB NOT NULL,
               verifier     BLOB NOT NULL,
+              wrapped_key  BLOB,
+              scheme       INTEGER NOT NULL DEFAULT 1,
               created_at   TEXT NOT NULL,
               last_used_at TEXT
             );
@@ -62,12 +64,22 @@ final readonly class Store
             CREATE INDEX IF NOT EXISTS auth_failures_ip_at ON auth_failures (ip, at);
             CREATE TABLE IF NOT EXISTS token_requests (ip TEXT NOT NULL, at INTEGER NOT NULL);
             CREATE INDEX IF NOT EXISTS token_requests_ip_at ON token_requests (ip, at);
+            CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value BLOB NOT NULL);
             SQL);
         // Files stored before per-user tokens have no owner (and aren't encrypted), so they're never listed
-        if (!in_array('user_id', array_column($db->query('PRAGMA table_info(files)')->fetchAll(), 'name'), true)) {
-            $db->exec('ALTER TABLE files ADD COLUMN user_id TEXT REFERENCES users (id)');
-        }
+        self::addColumn($db, 'files', 'user_id', 'TEXT REFERENCES users (id)');
         $db->exec('CREATE INDEX IF NOT EXISTS files_user_updated ON files (user_id, updated_at)');
+        // Users from before the pepper are scheme 1 until their next request upgrades them (see Users)
+        self::addColumn($db, 'users', 'wrapped_key', 'BLOB');
+        self::addColumn($db, 'users', 'scheme', 'INTEGER NOT NULL DEFAULT 1');
+    }
+
+    // Adds a column to a table created by an older version
+    private static function addColumn(\PDO $db, string $table, string $column, string $definition): void
+    {
+        if (!in_array($column, array_column($db->query("PRAGMA table_info({$table})")->fetchAll(), 'name'), true)) {
+            $db->exec("ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
+        }
     }
 
     // [name, format] from an X-File-Name header (percent-encoded UTF-8)
@@ -112,12 +124,18 @@ final readonly class Store
         return Config::DATA_DIR . "/files/{$id}";
     }
 
-    // A stored file's contents, decrypted chunk by chunk
+    // A stored file's contents, decrypted chunk by chunk. The whole file is authenticated before the first
+    // chunk comes out, so a damaged file is an error up front, never part of a download.
     /** @return \Generator<string> */
     public function read(string $id): \Generator
     {
         $file = fopen($this->path($id), 'rb') ?: throw new \RuntimeException("Can't open stored file {$id}");
         try {
+            foreach (Vault::decrypt($file, $this->user->fileKey, $id) as $_) {
+                // First pass: check every chunk, release nothing
+            }
+            // Same handle, so it's the same file even if an update replaces it in between
+            rewind($file);
             yield from Vault::decrypt($file, $this->user->fileKey, $id);
         } finally {
             fclose($file);

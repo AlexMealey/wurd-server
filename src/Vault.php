@@ -43,7 +43,8 @@ final class Vault
         } while ($left > 0);
     }
 
-    // The plaintext of a stored file, chunk by chunk. Throws if the key is wrong or the file was changed or cut short.
+    // The plaintext of a stored file, chunk by chunk. Throws if the key is wrong or the file was changed, cut short
+    // or added to. Each chunk is authenticated before it's yielded; Store::read checks them all before sending any.
     /**
      * @param resource $in
      * @return \Generator<string>
@@ -60,6 +61,9 @@ final class Vault
             [$chunk, $tag] = $result;
             yield $chunk;
         } while ($tag !== SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_FINAL);
+        if (self::read($in, 1) !== '') {
+            throw new \RuntimeException("Stored file {$id} has data after its final chunk");
+        }
     }
 
     // Reads up to $length bytes, fewer only at the end of the stream (php://input can return short reads)

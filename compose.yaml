@@ -14,6 +14,8 @@ services:
       WURD_MAX_TOTAL_MB: ${WURD_MAX_TOTAL_MB:-1024}
       WURD_MAX_FILES: ${WURD_MAX_FILES:-5000}
       WURD_ALLOWED_ORIGINS: ${WURD_ALLOWED_ORIGINS:-}
+      # Every vault key depends on it; without the original value no vault can be opened
+      WURD_PEPPER: ${WURD_PEPPER:?Set WURD_PEPPER in .env (see .env.example)}
       # Only the TLS proxy may report the client's IP (used for the failed-login limit)
       WURD_TRUSTED_PROXIES: ${WURD_PROXY_IP:-172.29.84.10}
     ports:
